@@ -1,226 +1,131 @@
 #include <stdio.h>
-#include <stdint.h>
 #include <string.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c.h"
-#include "esp_err.h"
 #include "esp_log.h"
+#include "esp_err.h"
 
-#define I2C_PORT        I2C_NUM_0
-#define I2C_SDA         21
-#define I2C_SCL         22
-#define I2C_FREQ_HZ     100000
+#define TAG "SPS30"
 
-#define SSD1306_ADDR    0x3C   
+// I2C pins
+#define I2C_MASTER_SDA_IO 21
+#define I2C_MASTER_SCL_IO 22
+#define I2C_MASTER_FREQ_HZ 100000
+#define I2C_MASTER_PORT I2C_NUM_0
 
-static uint8_t oled_buffer[128 * 8];
-static const char *TAG = "SSD1306";
+#define SPS30_ADDR 0x69
 
-/* ================= I2C ================= */
-
-static void i2c_init(void)
+// ---------------- CRC ----------------
+static uint8_t sps30_crc(const uint8_t data[2])
 {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_SDA,
-        .scl_io_num = I2C_SCL,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_FREQ_HZ
-    };
-
-    ESP_ERROR_CHECK(i2c_param_config(I2C_PORT, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0));
-}
-
-/* ================= OLED LOW LEVEL ================= */
-
-static void oled_cmd(uint8_t cmd)
-{
-    i2c_cmd_handle_t h = i2c_cmd_link_create();
-    i2c_master_start(h);
-    i2c_master_write_byte(h, (SSD1306_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(h, 0x00, true);
-    i2c_master_write_byte(h, cmd, true);
-    i2c_master_stop(h);
-    i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(h);
-}
-
-static void oled_init(void)
-{
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    oled_cmd(0xAE);
-    oled_cmd(0x20); oled_cmd(0x00);
-    oled_cmd(0xB0);
-    oled_cmd(0xC8);
-    oled_cmd(0x00);
-    oled_cmd(0x10);
-    oled_cmd(0x40);
-    oled_cmd(0x81); oled_cmd(0xCF);
-    oled_cmd(0xA1);
-    oled_cmd(0xA6);
-    oled_cmd(0xA8); oled_cmd(0x3F);
-    oled_cmd(0xA4);
-    oled_cmd(0xD3); oled_cmd(0x00);
-    oled_cmd(0xD5); oled_cmd(0x80);
-    oled_cmd(0xD9); oled_cmd(0xF1);
-    oled_cmd(0xDA); oled_cmd(0x12);
-    oled_cmd(0xDB); oled_cmd(0x40);
-    oled_cmd(0x8D); oled_cmd(0x14);
-    oled_cmd(0xAF);
-}
-
-/* ================= FONT (LIMITED BUT ENOUGH) ================= */
-
-static const uint8_t font[][5] = {
-    [' '-32] = {0x00,0x00,0x00,0x00,0x00},
-
-    // Numbers
-    ['0'-32] = {0x3E,0x51,0x49,0x45,0x3E},
-    ['1'-32] = {0x00,0x42,0x7F,0x40,0x00},
-    ['2'-32] = {0x42,0x61,0x51,0x49,0x46},
-    ['3'-32] = {0x21,0x41,0x45,0x4B,0x31},
-    ['4'-32] = {0x18,0x14,0x12,0x7F,0x10},
-    ['5'-32] = {0x27,0x45,0x45,0x45,0x39},
-    ['6'-32] = {0x3C,0x4A,0x49,0x49,0x30},
-    ['7'-32] = {0x01,0x71,0x09,0x05,0x03},
-    ['8'-32] = {0x36,0x49,0x49,0x49,0x36},
-    ['9'-32] = {0x06,0x49,0x49,0x29,0x1E},
-
-    // Uppercase A–Z
-    ['A'-32] = {0x7E,0x11,0x11,0x11,0x7E},
-    ['B'-32] = {0x7F,0x49,0x49,0x49,0x36},
-    ['C'-32] = {0x3E,0x41,0x41,0x41,0x22},
-    ['D'-32] = {0x7F,0x41,0x41,0x22,0x1C},
-    ['E'-32] = {0x7F,0x49,0x49,0x49,0x41},
-    ['F'-32] = {0x7F,0x09,0x09,0x09,0x01},
-    ['G'-32] = {0x3E,0x41,0x49,0x49,0x7A},
-    ['H'-32] = {0x7F,0x08,0x08,0x08,0x7F},
-    ['I'-32] = {0x00,0x41,0x7F,0x41,0x00},
-    ['J'-32] = {0x20,0x40,0x41,0x3F,0x01},
-    ['K'-32] = {0x7F,0x08,0x14,0x22,0x41},
-    ['L'-32] = {0x7F,0x40,0x40,0x40,0x40},
-    ['M'-32] = {0x7F,0x02,0x04,0x02,0x7F},
-    ['N'-32] = {0x7F,0x04,0x08,0x10,0x7F},
-    ['O'-32] = {0x3E,0x41,0x41,0x41,0x3E},
-    ['P'-32] = {0x7F,0x09,0x09,0x09,0x06},
-    ['Q'-32] = {0x3E,0x41,0x51,0x21,0x5E},
-    ['R'-32] = {0x7F,0x09,0x19,0x29,0x46},
-    ['S'-32] = {0x46,0x49,0x49,0x49,0x31},
-    ['T'-32] = {0x01,0x01,0x7F,0x01,0x01},
-    ['U'-32] = {0x3F,0x40,0x40,0x40,0x3F},
-    ['V'-32] = {0x1F,0x20,0x40,0x20,0x1F},
-    ['W'-32] = {0x3F,0x40,0x38,0x40,0x3F},
-    ['X'-32] = {0x63,0x14,0x08,0x14,0x63},
-    ['Y'-32] = {0x07,0x08,0x70,0x08,0x07},
-    ['Z'-32] = {0x61,0x51,0x49,0x45,0x43},
-
-    // Lowercase a–z
-    ['a'-32] = {0x20,0x54,0x54,0x54,0x78},
-    ['b'-32] = {0x7F,0x48,0x44,0x44,0x38},
-    ['c'-32] = {0x38,0x44,0x44,0x44,0x20},
-    ['d'-32] = {0x38,0x44,0x44,0x48,0x7F},
-    ['e'-32] = {0x38,0x54,0x54,0x54,0x18},
-    ['f'-32] = {0x08,0x7E,0x09,0x01,0x02},
-    ['g'-32] = {0x0C,0x52,0x52,0x52,0x3E},
-    ['h'-32] = {0x7F,0x08,0x04,0x04,0x78},
-    ['i'-32] = {0x00,0x44,0x7D,0x40,0x00},
-    ['j'-32] = {0x20,0x40,0x44,0x3D,0x00},
-    ['k'-32] = {0x7F,0x10,0x28,0x44,0x00},
-    ['l'-32] = {0x00,0x41,0x7F,0x40,0x00},
-    ['m'-32] = {0x7C,0x04,0x18,0x04,0x78},
-    ['n'-32] = {0x7C,0x08,0x04,0x04,0x78},
-    ['o'-32] = {0x38,0x44,0x44,0x44,0x38},
-    ['p'-32] = {0x7C,0x14,0x14,0x14,0x08},
-    ['q'-32] = {0x08,0x14,0x14,0x18,0x7C},
-    ['r'-32] = {0x7C,0x08,0x04,0x04,0x08},
-    ['s'-32] = {0x48,0x54,0x54,0x54,0x20},
-    ['t'-32] = {0x04,0x3F,0x44,0x40,0x20},
-    ['u'-32] = {0x3C,0x40,0x40,0x20,0x7C},
-    ['v'-32] = {0x1C,0x20,0x40,0x20,0x1C},
-    ['w'-32] = {0x3C,0x40,0x30,0x40,0x3C},
-    ['x'-32] = {0x44,0x28,0x10,0x28,0x44},
-    ['y'-32] = {0x0C,0x50,0x50,0x50,0x3C},
-    ['z'-32] = {0x44,0x64,0x54,0x4C,0x44},
-
-    // Punctuation
-    ['!'-32] = {0x00,0x00,0x5F,0x00,0x00},
-    ['.'-32] = {0x00,0x60,0x60,0x00,0x00},
-    [','-32] = {0x00,0x80,0x60,0x00,0x00},
-    ['?'-32] = {0x02,0x01,0x51,0x09,0x06},
-    ['-'-32] = {0x08,0x08,0x08,0x08,0x08},
-    ['/'-32] = {0x20,0x10,0x08,0x04,0x02},
-};
-
-
-/* ================= DRAWING ================= */
-
-static void oled_clear(void)
-{
-    memset(oled_buffer, 0x00, sizeof(oled_buffer));
-}
-
-static void oled_draw_char(char c, int x, int page)
-{
-    if (c < 32 || c > 126) return;
-
-    for (int i = 0; i < 5; i++)
-        oled_buffer[page * 128 + x + i] = font[c - 32][i];
-}
-
-static void oled_draw_text(const char *text, int x, int page)
-{
-    while (*text) {
-        oled_draw_char(*text++, x, page);
-        x += 6;
+    uint8_t crc = 0xFF;
+    for (int i = 0; i < 2; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc & 0x80) ? (crc << 1) ^ 0x31 : (crc << 1);
+        }
     }
+    return crc;
 }
 
-static void oled_update(void)
+// ---------------- Decode float ----------------
+static float decode_float(const uint8_t *buf)
 {
-    for (int page = 0; page < 8; page++) {
-        oled_cmd(0xB0 + page);
-        oled_cmd(0x00);
-        oled_cmd(0x10);
+    uint8_t word1[2] = { buf[0], buf[1] };
+    uint8_t crc1     = buf[2];
+    uint8_t word2[2] = { buf[3], buf[4] };
+    uint8_t crc2     = buf[5];
 
-        i2c_cmd_handle_t h = i2c_cmd_link_create();
-        i2c_master_start(h);
-        i2c_master_write_byte(h, (SSD1306_ADDR << 1) | I2C_MASTER_WRITE, true);
-        i2c_master_write_byte(h, 0x40, true);
-        i2c_master_write(h, &oled_buffer[page * 128], 128, true);
-        i2c_master_stop(h);
-        i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(100));
-        i2c_cmd_link_delete(h);
+    if (sps30_crc(word1) != crc1 || sps30_crc(word2) != crc2) {
+        ESP_LOGW(TAG, "CRC mismatch");
     }
+
+    // SPS30 sends big endian float
+    uint8_t be[4] = { word1[0], word1[1], word2[0], word2[1] };
+    uint8_t le[4] = { be[3], be[2], be[1], be[0] }; // convert to little endian
+
+    float f;
+    memcpy(&f, le, sizeof(f));
+    return f;
 }
 
-/* ================= MAIN ================= */
+// ---------------- Start measurement ----------------
+static esp_err_t sps30_start_measurement(void)
+{
+    uint8_t cmd[5];
+    cmd[0] = 0x00;
+    cmd[1] = 0x10;
+    cmd[2] = 0x03;  // float format
+    cmd[3] = 0x00;  
+    uint8_t data[2] = {cmd[2], cmd[3]};
+    cmd[4] = sps30_crc(data);
 
+    return i2c_master_write_to_device(I2C_MASTER_PORT, SPS30_ADDR,
+                                      cmd, sizeof(cmd),
+                                      1000 / portTICK_PERIOD_MS);
+}
+
+// ---------------- Read measurement ----------------
+static esp_err_t sps30_read_values(uint8_t *rxbuf)
+{
+    uint8_t cmd[2] = {0x03, 0x00};
+
+    ESP_ERROR_CHECK(i2c_master_write_to_device(
+        I2C_MASTER_PORT, SPS30_ADDR,
+        cmd, sizeof(cmd), 1000 / portTICK_PERIOD_MS));
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    return i2c_master_read_from_device(
+        I2C_MASTER_PORT, SPS30_ADDR,
+        rxbuf, 60,
+        1000 / portTICK_PERIOD_MS);
+}
+
+// ---------------- MAIN ----------------
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Init");
-    i2c_init();
-    oled_init();
+    // ---- I2C init ----
+    i2c_config_t config = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_MASTER_FREQ_HZ
+    };
 
-    oled_clear();
-    oled_draw_text("HELLO ESP32!", 0, 0);
-    oled_draw_text("ESP32 + OLED", 2, 2);
-    oled_draw_text("sil is a quitter", 0, 4);
-    oled_update();
+    ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_PORT, &config));
+    ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_PORT, I2C_MODE_MASTER, 0, 0, 0));
 
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_LOGI(TAG, "I2C initialized");
 
-    oled_clear();
-    oled_draw_text("New", 0, 0);
-    oled_draw_text("YAY", 0, 2);
-    oled_draw_text("sil is a quitter", 3, 4);
-    oled_update();
+    // ---- Start measurement ----
+    ESP_ERROR_CHECK(sps30_start_measurement());
+    ESP_LOGI(TAG, "SPS30 measurement started");
 
+    vTaskDelay(pdMS_TO_TICKS(3000));
 
+    uint8_t rxbuf[60];
 
-    ESP_LOGI(TAG, "Text displayed ✅");
+    while (1) {
+
+        if (sps30_read_values(rxbuf) == ESP_OK) {
+
+            float pm1  = decode_float(&rxbuf[0]);
+            float pm25 = decode_float(&rxbuf[6]);
+            float pm4  = decode_float(&rxbuf[12]);
+            float pm10 = decode_float(&rxbuf[18]);
+
+            ESP_LOGI(TAG,
+                "PM1.0: %.2f  | PM2.5: %.2f  | PM4: %.2f  | PM10: %.2f (µg/m³)",
+                pm1, pm25, pm4, pm10);
+        }
+        else {
+            ESP_LOGW(TAG, "Failed to read SPS30 data");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
