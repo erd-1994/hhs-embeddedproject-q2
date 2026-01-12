@@ -1,226 +1,252 @@
 #include <stdio.h>
-#include <stdint.h>
 #include <string.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "driver/i2c.h"
+#include "esp_timer.h"
+#include "esp_lcd_panel_io.h"
+#include "esp_lcd_panel_vendor.h"
+#include "esp_lcd_panel_ops.h"
+#include "driver/gpio.h"
+#include "driver/spi_master.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_random.h"
+#include "lvgl.h"
+#include "bsp/esp-bsp.h"
 
-#define I2C_PORT        I2C_NUM_0
-#define I2C_SDA         21
-#define I2C_SCL         22
-#define I2C_FREQ_HZ     100000
+static const char *TAG = "DisplayManager";
 
-#define SSD1306_ADDR    0x3C   
+// Display modes
+typedef enum {
+    DISPLAY_MODE_MULTI_SENSOR,
+    DISPLAY_MODE_GRAPH,
+    DISPLAY_MODE_MAX
+} display_mode_t;
 
-static uint8_t oled_buffer[128 * 8];
-static const char *TAG = "SSD1306";
+// Display context
+typedef struct {
+    lv_obj_t *screen;
+    lv_obj_t *label_title;
+    lv_obj_t *label_value1;
+    lv_obj_t *label_value2;
+    lv_obj_t *label_value3;
+    lv_obj_t *chart;
+    lv_chart_series_t *chart_series;
+    display_mode_t current_mode;
+} display_ctx_t;
 
-/* ================= I2C ================= */
+static display_ctx_t display_ctx;
 
-static void i2c_init(void)
-{
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_SDA,
-        .scl_io_num = I2C_SCL,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_FREQ_HZ
-    };
-
-    ESP_ERROR_CHECK(i2c_param_config(I2C_PORT, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0));
+// Simulated sensor data (replace with your actual sensor readings)
+// If more sensors need to be added, make a new float and add it in the appropried display modes(or just ask Ai to do it)
+static float get_sensor_temperature(void) {
+    return 25.5f + (esp_random() % 100) / 10.0f;
 }
 
-/* ================= OLED LOW LEVEL ================= */
-
-static void oled_cmd(uint8_t cmd)
-{
-    i2c_cmd_handle_t h = i2c_cmd_link_create();
-    i2c_master_start(h);
-    i2c_master_write_byte(h, (SSD1306_ADDR << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(h, 0x00, true);
-    i2c_master_write_byte(h, cmd, true);
-    i2c_master_stop(h);
-    i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(100));
-    i2c_cmd_link_delete(h);
+static float get_sensor_humidity(void) {
+    return 45.0f + (esp_random() % 200) / 10.0f;
 }
 
-static void oled_init(void)
-{
+static float get_sensor_pressure(void) {
+    return 1013.0f + (esp_random() % 100) / 10.0f;
+}
+
+// Create display mode: Single sensor view
+static void create_sensor_single_view(lv_obj_t *screen, const char *title) {
+    lv_obj_clean(screen);
+    
+    // Title
+    display_ctx.label_title = lv_label_create(screen);
+    lv_label_set_text(display_ctx.label_title, title);
+    lv_obj_set_style_text_color(display_ctx.label_title, lv_color_white(), 0);
+    lv_obj_align(display_ctx.label_title, LV_ALIGN_TOP_MID, 0, 10);
+    
+    // Value
+    display_ctx.label_value1 = lv_label_create(screen);
+    lv_obj_set_style_text_color(display_ctx.label_value1, lv_color_white(), 0);
+    lv_obj_align(display_ctx.label_value1, LV_ALIGN_CENTER, 0, 0);
+}
+
+// Create display mode: Multiple sensors
+static void create_multi_sensor_view(lv_obj_t *screen) {
+    lv_obj_clean(screen);
+    
+    // Title
+    display_ctx.label_title = lv_label_create(screen);
+    lv_label_set_text(display_ctx.label_title, "All Sensors");
+    lv_obj_set_style_text_color(display_ctx.label_title, lv_color_white(), 0);
+    lv_obj_align(display_ctx.label_title, LV_ALIGN_TOP_MID, 0, 5);
+    
+    // Temperature
+    display_ctx.label_value1 = lv_label_create(screen);
+    lv_obj_set_style_text_color(display_ctx.label_value1, lv_color_white(), 0);
+    lv_obj_align(display_ctx.label_value1, LV_ALIGN_TOP_LEFT, 10, 35);
+    
+    // Humidity
+    display_ctx.label_value2 = lv_label_create(screen);
+    lv_obj_set_style_text_color(display_ctx.label_value2, lv_color_white(), 0);
+    lv_obj_align(display_ctx.label_value2, LV_ALIGN_TOP_LEFT, 10, 65);
+    
+    // Pressure
+    display_ctx.label_value3 = lv_label_create(screen);
+    lv_obj_set_style_text_color(display_ctx.label_value3, lv_color_white(), 0);
+    lv_obj_align(display_ctx.label_value3, LV_ALIGN_TOP_LEFT, 10, 95);
+}
+
+// Create display mode: Graph view
+static void create_graph_view(lv_obj_t *screen) {
+    lv_obj_clean(screen);
+    
+    // Title
+    display_ctx.label_title = lv_label_create(screen);
+    lv_label_set_text(display_ctx.label_title, "Temperature");
+    lv_obj_set_style_text_color(display_ctx.label_title, lv_color_white(), 0);
+    lv_obj_align(display_ctx.label_title, LV_ALIGN_TOP_MID, 0, 5);
+    
+    // Chart
+    display_ctx.chart = lv_chart_create(screen);
+    lv_obj_set_size(display_ctx.chart, 220, 100);
+    lv_obj_align(display_ctx.chart, LV_ALIGN_BOTTOM_MID, 0, -5);
+    lv_chart_set_type(display_ctx.chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(display_ctx.chart, 20);
+    lv_chart_set_range(display_ctx.chart, LV_CHART_AXIS_PRIMARY_Y, 0, 50);
+    
+    display_ctx.chart_series = lv_chart_add_series(display_ctx.chart, 
+                                                     lv_palette_main(LV_PALETTE_RED),
+                                                     LV_CHART_AXIS_PRIMARY_Y);
+}
+
+// Update display based on current mode
+static void update_display(void) {
+    float temp = get_sensor_temperature();
+    float humid = get_sensor_humidity();
+    float press = get_sensor_pressure();
+    
+    char buf[64];
+    
+    switch (display_ctx.current_mode) {
+        case DISPLAY_MODE_MULTI_SENSOR:
+            snprintf(buf, sizeof(buf), "Temp: %.1f C", temp);
+            lv_label_set_text(display_ctx.label_value1, buf);
+            snprintf(buf, sizeof(buf), "Humid: %.1f %%", humid);
+            lv_label_set_text(display_ctx.label_value2, buf);
+            snprintf(buf, sizeof(buf), "Press: %.1f hPa", press);
+            lv_label_set_text(display_ctx.label_value3, buf);
+            break;
+            
+        case DISPLAY_MODE_GRAPH:
+            lv_chart_set_next_value(display_ctx.chart, display_ctx.chart_series, (int16_t)temp);
+            lv_chart_refresh(display_ctx.chart);
+            break;
+            
+        default:
+            break;
+    }
+}
+
+// Change display mode
+void display_set_mode(display_mode_t mode) {
+    if (mode >= DISPLAY_MODE_MAX) {
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Setting display mode to %d", mode);
+    display_ctx.current_mode = mode;
+    
+    switch (mode) {
+        case DISPLAY_MODE_MULTI_SENSOR:
+            create_multi_sensor_view(display_ctx.screen);
+            ESP_LOGI(TAG, "Created Multi-sensor view");
+            break;
+            
+        case DISPLAY_MODE_GRAPH:
+            create_graph_view(display_ctx.screen);
+            ESP_LOGI(TAG, "Created Graph view");
+            break;
+            
+        default:
+            break;
+    }
+    
+    update_display();
+    ESP_LOGI(TAG, "Display updated");
+}
+
+// Cycle through display modes (e.g., on button press)
+void display_next_mode(void) {
+    display_mode_t next = (display_ctx.current_mode + 1) % DISPLAY_MODE_MAX;
+    ESP_LOGI(TAG, "Switching to mode %d", next);
+    display_set_mode(next);
+}
+
+// Display update task
+static void display_task(void *pvParameter) {
+    while (1) {
+        // Lock the LVGL mutex before any LVGL operations
+        if (bsp_display_lock(pdMS_TO_TICKS(10))) {
+            update_display();
+            lv_task_handler();
+            bsp_display_unlock();
+        }
+        
+        // Yield to other tasks and watchdog
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+// Initialize display
+void display_init(void) {
+    ESP_LOGI(TAG, "Initializing display");
+    
+    // Initialize BSP display
+    lv_display_t *disp = bsp_display_start();
+    if (disp == NULL) {
+        ESP_LOGE(TAG, "Failed to initialize display");
+        return;
+    }
+    
+    // Set backlight to maximum
+    ESP_LOGI(TAG, "Setting backlight");
+    bsp_display_backlight_on();
+    
+    // Small delay to let display stabilize
     vTaskDelay(pdMS_TO_TICKS(100));
-
-    oled_cmd(0xAE);
-    oled_cmd(0x20); oled_cmd(0x00);
-    oled_cmd(0xB0);
-    oled_cmd(0xC8);
-    oled_cmd(0x00);
-    oled_cmd(0x10);
-    oled_cmd(0x40);
-    oled_cmd(0x81); oled_cmd(0xCF);
-    oled_cmd(0xA1);
-    oled_cmd(0xA6);
-    oled_cmd(0xA8); oled_cmd(0x3F);
-    oled_cmd(0xA4);
-    oled_cmd(0xD3); oled_cmd(0x00);
-    oled_cmd(0xD5); oled_cmd(0x80);
-    oled_cmd(0xD9); oled_cmd(0xF1);
-    oled_cmd(0xDA); oled_cmd(0x12);
-    oled_cmd(0xDB); oled_cmd(0x40);
-    oled_cmd(0x8D); oled_cmd(0x14);
-    oled_cmd(0xAF);
+    
+    // Lock LVGL mutex before modifications
+    bsp_display_lock(0);
+    
+    // Create screen
+    display_ctx.screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(display_ctx.screen, lv_color_black(), 0);
+    lv_scr_load(display_ctx.screen);
+    
+    // Set initial mode
+    display_ctx.current_mode = DISPLAY_MODE_MULTI_SENSOR;
+    display_set_mode(DISPLAY_MODE_MULTI_SENSOR);
+    
+    // Unlock LVGL mutex
+    bsp_display_unlock();
+    
+    ESP_LOGI(TAG, "Display initialized");
 }
 
-/* ================= FONT (LIMITED BUT ENOUGH) ================= */
-
-static const uint8_t font[][5] = {
-    [' '-32] = {0x00,0x00,0x00,0x00,0x00},
-
-    // Numbers
-    ['0'-32] = {0x3E,0x51,0x49,0x45,0x3E},
-    ['1'-32] = {0x00,0x42,0x7F,0x40,0x00},
-    ['2'-32] = {0x42,0x61,0x51,0x49,0x46},
-    ['3'-32] = {0x21,0x41,0x45,0x4B,0x31},
-    ['4'-32] = {0x18,0x14,0x12,0x7F,0x10},
-    ['5'-32] = {0x27,0x45,0x45,0x45,0x39},
-    ['6'-32] = {0x3C,0x4A,0x49,0x49,0x30},
-    ['7'-32] = {0x01,0x71,0x09,0x05,0x03},
-    ['8'-32] = {0x36,0x49,0x49,0x49,0x36},
-    ['9'-32] = {0x06,0x49,0x49,0x29,0x1E},
-
-    // Uppercase A–Z
-    ['A'-32] = {0x7E,0x11,0x11,0x11,0x7E},
-    ['B'-32] = {0x7F,0x49,0x49,0x49,0x36},
-    ['C'-32] = {0x3E,0x41,0x41,0x41,0x22},
-    ['D'-32] = {0x7F,0x41,0x41,0x22,0x1C},
-    ['E'-32] = {0x7F,0x49,0x49,0x49,0x41},
-    ['F'-32] = {0x7F,0x09,0x09,0x09,0x01},
-    ['G'-32] = {0x3E,0x41,0x49,0x49,0x7A},
-    ['H'-32] = {0x7F,0x08,0x08,0x08,0x7F},
-    ['I'-32] = {0x00,0x41,0x7F,0x41,0x00},
-    ['J'-32] = {0x20,0x40,0x41,0x3F,0x01},
-    ['K'-32] = {0x7F,0x08,0x14,0x22,0x41},
-    ['L'-32] = {0x7F,0x40,0x40,0x40,0x40},
-    ['M'-32] = {0x7F,0x02,0x04,0x02,0x7F},
-    ['N'-32] = {0x7F,0x04,0x08,0x10,0x7F},
-    ['O'-32] = {0x3E,0x41,0x41,0x41,0x3E},
-    ['P'-32] = {0x7F,0x09,0x09,0x09,0x06},
-    ['Q'-32] = {0x3E,0x41,0x51,0x21,0x5E},
-    ['R'-32] = {0x7F,0x09,0x19,0x29,0x46},
-    ['S'-32] = {0x46,0x49,0x49,0x49,0x31},
-    ['T'-32] = {0x01,0x01,0x7F,0x01,0x01},
-    ['U'-32] = {0x3F,0x40,0x40,0x40,0x3F},
-    ['V'-32] = {0x1F,0x20,0x40,0x20,0x1F},
-    ['W'-32] = {0x3F,0x40,0x38,0x40,0x3F},
-    ['X'-32] = {0x63,0x14,0x08,0x14,0x63},
-    ['Y'-32] = {0x07,0x08,0x70,0x08,0x07},
-    ['Z'-32] = {0x61,0x51,0x49,0x45,0x43},
-
-    // Lowercase a–z
-    ['a'-32] = {0x20,0x54,0x54,0x54,0x78},
-    ['b'-32] = {0x7F,0x48,0x44,0x44,0x38},
-    ['c'-32] = {0x38,0x44,0x44,0x44,0x20},
-    ['d'-32] = {0x38,0x44,0x44,0x48,0x7F},
-    ['e'-32] = {0x38,0x54,0x54,0x54,0x18},
-    ['f'-32] = {0x08,0x7E,0x09,0x01,0x02},
-    ['g'-32] = {0x0C,0x52,0x52,0x52,0x3E},
-    ['h'-32] = {0x7F,0x08,0x04,0x04,0x78},
-    ['i'-32] = {0x00,0x44,0x7D,0x40,0x00},
-    ['j'-32] = {0x20,0x40,0x44,0x3D,0x00},
-    ['k'-32] = {0x7F,0x10,0x28,0x44,0x00},
-    ['l'-32] = {0x00,0x41,0x7F,0x40,0x00},
-    ['m'-32] = {0x7C,0x04,0x18,0x04,0x78},
-    ['n'-32] = {0x7C,0x08,0x04,0x04,0x78},
-    ['o'-32] = {0x38,0x44,0x44,0x44,0x38},
-    ['p'-32] = {0x7C,0x14,0x14,0x14,0x08},
-    ['q'-32] = {0x08,0x14,0x14,0x18,0x7C},
-    ['r'-32] = {0x7C,0x08,0x04,0x04,0x08},
-    ['s'-32] = {0x48,0x54,0x54,0x54,0x20},
-    ['t'-32] = {0x04,0x3F,0x44,0x40,0x20},
-    ['u'-32] = {0x3C,0x40,0x40,0x20,0x7C},
-    ['v'-32] = {0x1C,0x20,0x40,0x20,0x1C},
-    ['w'-32] = {0x3C,0x40,0x30,0x40,0x3C},
-    ['x'-32] = {0x44,0x28,0x10,0x28,0x44},
-    ['y'-32] = {0x0C,0x50,0x50,0x50,0x3C},
-    ['z'-32] = {0x44,0x64,0x54,0x4C,0x44},
-
-    // Punctuation
-    ['!'-32] = {0x00,0x00,0x5F,0x00,0x00},
-    ['.'-32] = {0x00,0x60,0x60,0x00,0x00},
-    [','-32] = {0x00,0x80,0x60,0x00,0x00},
-    ['?'-32] = {0x02,0x01,0x51,0x09,0x06},
-    ['-'-32] = {0x08,0x08,0x08,0x08,0x08},
-    ['/'-32] = {0x20,0x10,0x08,0x04,0x02},
-};
-
-
-/* ================= DRAWING ================= */
-
-static void oled_clear(void)
-{
-    memset(oled_buffer, 0x00, sizeof(oled_buffer));
-}
-
-static void oled_draw_char(char c, int x, int page)
-{
-    if (c < 32 || c > 126) return;
-
-    for (int i = 0; i < 5; i++)
-        oled_buffer[page * 128 + x + i] = font[c - 32][i];
-}
-
-static void oled_draw_text(const char *text, int x, int page)
-{
-    while (*text) {
-        oled_draw_char(*text++, x, page);
-        x += 6;
+void app_main(void) {
+    ESP_LOGI(TAG, "Starting Display Manager");
+    
+    // Initialize display
+    display_init();
+    
+    // Create display update task with larger stack
+    xTaskCreate(display_task, "display_task", 8192, NULL, 4, NULL);
+    
+    // Example: Change mode every 5 seconds
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        
+        // Lock before changing mode
+        if (bsp_display_lock(pdMS_TO_TICKS(100))) {
+            display_next_mode();
+            bsp_display_unlock();
+        }
     }
-}
-
-static void oled_update(void)
-{
-    for (int page = 0; page < 8; page++) {
-        oled_cmd(0xB0 + page);
-        oled_cmd(0x00);
-        oled_cmd(0x10);
-
-        i2c_cmd_handle_t h = i2c_cmd_link_create();
-        i2c_master_start(h);
-        i2c_master_write_byte(h, (SSD1306_ADDR << 1) | I2C_MASTER_WRITE, true);
-        i2c_master_write_byte(h, 0x40, true);
-        i2c_master_write(h, &oled_buffer[page * 128], 128, true);
-        i2c_master_stop(h);
-        i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(100));
-        i2c_cmd_link_delete(h);
-    }
-}
-
-/* ================= MAIN ================= */
-
-void app_main(void)
-{
-    ESP_LOGI(TAG, "Init");
-    i2c_init();
-    oled_init();
-
-    oled_clear();
-    oled_draw_text("HELLO ESP32!", 0, 0);
-    oled_draw_text("ESP32 + OLED", 2, 2);
-    oled_draw_text("sil is a quitter", 0, 4);
-    oled_update();
-
-    vTaskDelay(pdMS_TO_TICKS(5000));
-
-    oled_clear();
-    oled_draw_text("New", 0, 0);
-    oled_draw_text("YAY", 0, 2);
-    oled_draw_text("sil is a quitter", 3, 4);
-    oled_update();
-
-
-
-    ESP_LOGI(TAG, "Text displayed ✅");
 }
