@@ -20,3 +20,13 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+# local wi-fi config
+sensitive.h
+# build folder
+build/
+# cache
+.cache/
+# Config
+sdkconfig
+dependencies.lock
+managed_components/
