@@ -1,11 +1,17 @@
-idf_component_register(SRCS "main_2.c"
-                       PRIV_REQUIRES spi_flash
-                       REQUIRES 
-                       esp_lcd
-                       esp_timer
-                       driver
-                       esp_wifi
-                       nvs_flash
-                       mqtt
-                       INCLUDE_DIRS "."
-                       )
+idf_component_register(
+    SRCS "main.c"
+    INCLUDE_DIRS "."
+    REQUIRES 
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        mqtt
+        driver
+        esp_timer
+        lvgl
+        esp_lcd
+        aht
+        bmp280
+        i2cdev
+)
