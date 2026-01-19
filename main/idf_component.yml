@@ -17,3 +17,5 @@ dependencies:
   lvgl/lvgl: ^8.3
   esp-idf-lib/bmp280: ^1.0.7
   esp-idf-lib/aht: ^1.0.8
+  espressif/esp_bsp_generic: ^3.0.2
+
