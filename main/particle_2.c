@@ -1,4 +1,4 @@
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -23,6 +23,10 @@ static const char *TAG = "SPS30";
 #define SPS30_CMD_READ_DATA_READY 0x0202
 #define SPS30_CMD_READ_MEASUREMENT 0x0300
 
+/* Global I2C handles */
+static i2c_master_bus_handle_t bus_handle = NULL;
+static i2c_master_dev_handle_t dev_handle = NULL;
+
 /* CRC8: polynomial 0x31, init 0xFF (Sensirion standard) */
 static uint8_t sensirion_crc8(const uint8_t *data, size_t len) {
     uint8_t crc = 0xFF;
@@ -36,16 +40,24 @@ static uint8_t sensirion_crc8(const uint8_t *data, size_t len) {
 }
 
 static esp_err_t i2c_master_init(void) {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = I2C_SDA_GPIO,
+    /* Create I2C bus */
+    i2c_master_bus_config_t bus_config = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = I2C_PORT,
         .scl_io_num = I2C_SCL_GPIO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_FREQ_HZ,
+        .sda_io_num = I2C_SDA_GPIO,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
     };
-    ESP_ERROR_CHECK(i2c_param_config(I2C_PORT, &conf));
-    return i2c_driver_install(I2C_PORT, conf.mode, 0, 0, 0);
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_config, &bus_handle));
+
+    /* Add SPS30 device to the bus */
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = SPS30_I2C_ADDR,
+        .scl_speed_hz = I2C_FREQ_HZ,
+    };
+    return i2c_master_bus_add_device(bus_handle, &dev_config, &dev_handle);
 }
 
 static esp_err_t sps30_write_cmd_with_args(uint16_t cmd,
@@ -63,8 +75,7 @@ static esp_err_t sps30_write_cmd_with_args(uint16_t cmd,
         memcpy(&buf[2], args_words_crc, args_len);
     }
 
-    return i2c_master_write_to_device(I2C_PORT, SPS30_I2C_ADDR, buf, 2 + args_len,
-                                    pdMS_TO_TICKS(200));
+    return i2c_master_transmit(dev_handle, buf, 2 + args_len, 200);
 }
 
 static esp_err_t sps30_write_cmd(uint16_t cmd) {
@@ -76,8 +87,7 @@ static esp_err_t sps30_read_words_with_crc(uint16_t cmd, uint8_t *out,
     /* Send cmd (2 bytes), then read out_len bytes */
     uint8_t c[2] = {(uint8_t)(cmd >> 8), (uint8_t)(cmd & 0xFF)};
 
-    esp_err_t err = i2c_master_write_to_device(I2C_PORT, SPS30_I2C_ADDR, c, 2,
-                                             pdMS_TO_TICKS(200));
+    esp_err_t err = i2c_master_transmit(dev_handle, c, 2, 200);
     if (err != ESP_OK) {
         return err;
     }
@@ -85,8 +95,7 @@ static esp_err_t sps30_read_words_with_crc(uint16_t cmd, uint8_t *out,
     /* SPS30 needs small processing time for some commands; safe tiny delay */
     vTaskDelay(pdMS_TO_TICKS(5));
 
-    err = i2c_master_read_from_device(I2C_PORT, SPS30_I2C_ADDR, out, out_len,
-                                    pdMS_TO_TICKS(300));
+    err = i2c_master_receive(dev_handle, out, out_len, 300);
     return err;
 }
 
