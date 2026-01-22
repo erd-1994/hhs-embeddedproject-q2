@@ -19,3 +19,19 @@
 
 /* SPS30 Typical Particle Size topic (in micrometers) */
 #define MQTT_TOPIC_SPS30_TPS "sensors/sps30/typical_size_um"
+
+/* Subscription Topics for Updates */
+#define TOPIC_UPDATE_TEMP_HIGH "update/threshold_high/temperature"
+#define TOPIC_UPDATE_TEMP_LOW "update/threshold_low/temperature"
+#define TOPIC_UPDATE_HUM_HIGH "update/threshold_high/humidity"
+#define TOPIC_UPDATE_HUM_LOW "update/threshold_low/humidity"
+#define TOPIC_UPDATE_PM25_HIGH "update/threshold_high/pm25"
+
+/* ==================== THRESHOLD STATE TOPICS ==================== */
+/* These are the topics where the ESP32 will publish the current threshold
+ * values */
+#define TOPIC_STATE_TEMP_HIGH "state/threshold_high/temperature"
+#define TOPIC_STATE_TEMP_LOW "state/threshold_low/temperature"
+#define TOPIC_STATE_HUM_HIGH "state/threshold_high/humidity"
+#define TOPIC_STATE_HUM_LOW "state/threshold_low/humidity"
+#define TOPIC_STATE_PM25_HIGH "state/threshold_high/pm25"

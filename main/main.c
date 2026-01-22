@@ -26,11 +26,14 @@
 #include "lvgl.h"
 #include "bsp/esp-bsp.h"
 
-/* server config */
-#include "sensitive.h"
-
 /* topics */
 #include "mqtt_topics.h"
+
+/* server config  PRIVATE */
+#include "sensitive.h"
+
+/* TLS certificate PRIVATE */
+#include "server_root_cert.h"
 
 /* ==================== ALARM CONFIGURATION ==================== */
 #define BUZZER_PIN GPIO_NUM_33
@@ -39,12 +42,14 @@
 #define PARTICLE_PIN GPIO_NUM_27
 #define LED_BLINK_DURATION 2000
 
-/* Threshold values - adjust these as needed */
-#define TEMP_HIGH_THRESHOLD 30.0f
-#define TEMP_LOW_THRESHOLD 15.0f
-#define HUM_HIGH_THRESHOLD 70.0f
-#define HUM_LOW_THRESHOLD 30.0f
-#define PM25_HIGH_THRESHOLD 35.0f  // WHO guideline: 25 μg/m³ daily, 35 is concerning
+/* ==================== GLOBAL VARIABLES & THRESHOLDS ==================== */
+/* Default Threshold values (now variables so they can be updated via MQTT) */
+volatile float g_temp_high_threshold = 30.0f;
+volatile float g_temp_low_threshold = 15.0f;
+volatile float g_hum_high_threshold = 70.0f;
+volatile float g_hum_low_threshold = 30.0f;
+volatile float g_pm25_high_threshold = 35.0f;
+
 
 /* ==================== GLOBAL VARIABLES ==================== */
 #define MAX_RETRY 10
@@ -219,21 +224,21 @@ static void trigger_alarm(AlarmType alarm_type, bool active) {
 
 static void check_alarms(void) {
     /* Temperature alarm */
-    if (g_aht_temp > TEMP_HIGH_THRESHOLD || g_aht_temp < TEMP_LOW_THRESHOLD) {
+    if (g_aht_temp > g_temp_high_threshold || g_aht_temp < g_temp_low_threshold) {
         trigger_alarm(TEMPERATURE, true);
     } else {
         trigger_alarm(TEMPERATURE, false);
     }
 
     /* Humidity alarm */
-    if (g_aht_rh > HUM_HIGH_THRESHOLD || g_aht_rh < HUM_LOW_THRESHOLD) {
+    if (g_aht_rh > g_hum_high_threshold || g_aht_rh < g_hum_low_threshold) {
         trigger_alarm(HUMIDITY, true);
     } else {
         trigger_alarm(HUMIDITY, false);
     }
 
     /* Particle alarm */
-    if (g_pm25 > PM25_HIGH_THRESHOLD) {
+    if (g_pm25 > g_pm25_high_threshold) {
         trigger_alarm(PARTICLE, true);
     } else {
         trigger_alarm(PARTICLE, false);
@@ -246,7 +251,6 @@ static void check_alarms(void) {
         trigger_alarm(BUZZER, false);
     }
 }
-
 /* ===================== DISPLAY FUNCTIONS ===================== */
 
 static void create_multi_sensor_view(lv_obj_t *screen) {
@@ -279,9 +283,11 @@ static void create_multi_sensor_view(lv_obj_t *screen) {
     lv_obj_align(display_ctx.label_pm25, LV_ALIGN_TOP_LEFT, 10, 105);
 
     /* Status */
-    // display_ctx.label_status = lv_label_create(screen);
-    // lv_obj_set_style_text_color(display_ctx.label_status, lv_color_white(), 0);
-    // lv_obj_align(display_ctx.label_status, LV_ALIGN_BOTTOM_MID, 0, -5);
+    /*
+       display_ctx.label_status = lv_label_create(screen);
+       lv_obj_set_style_text_color(display_ctx.label_status, lv_color_white(), 0);
+       lv_obj_align(display_ctx.label_status, LV_ALIGN_BOTTOM_MID, 0, -5);
+     */
 }
 
 static void create_graph_view(lv_obj_t *screen) {
@@ -328,8 +334,10 @@ static void update_display(void) {
         snprintf(buf, sizeof(buf), "PM10: %.1f ug/m3", g_pm10);
         lv_label_set_text(display_ctx.label_press, buf);
 
-        // snprintf(buf, sizeof(buf), "MQTT: %s", g_mqtt_connected ? "Connected" : "DISCONNECTED");
-        // lv_label_set_text(display_ctx.label_status, buf);
+        /*
+           snprintf(buf, sizeof(buf), "MQTT: %s", g_mqtt_connected ? "Connected" : "DISCONNECTED");
+           lv_label_set_text(display_ctx.label_status, buf);
+         */
         break;
 
     case DISPLAY_MODE_GRAPH:
@@ -376,7 +384,7 @@ static void display_next_mode(void) {
 
 static void display_task(void *pvParameter) {
     while (1) {
-        //Display disabled - BSP not available
+        /*Display disabled - BSP not available */
         if (bsp_display_lock(pdMS_TO_TICKS(10))) {
             update_display();
             lv_task_handler();
@@ -734,49 +742,130 @@ static void wifi_init_sta(void) {
     }
 }
 
-/* ================== MQTT LOGIC ================== */
+static void publish_threshold_state(const char *topic, float value) {
+    if (client == NULL || !g_mqtt_connected) {
+        return;
+    }
+    char payload[16];
+    /* Format to 2 decimal places */
+    snprintf(payload, sizeof(payload), "%.2f", value);
+
+    /* Publish with QoS 1 and Retain = 1 */
+    esp_mqtt_client_publish(client, topic, payload, 0, 1, 1);
+    ESP_LOGI(TAG, "Published state to %s: %s", topic, payload);
+}
+
+/* ================== MQTT TLS LOGIC ================== */
 
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data) {
     ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32,
            base, event_id);
     esp_mqtt_event_handle_t event = event_data;
+    esp_mqtt_client_handle_t client = event->client;
 
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
         g_mqtt_connected = true;
-        check_alarms();  /* Update alarm state */
+
+        /* 1. Subscribe to threshold update topics */
+        esp_mqtt_client_subscribe(client, TOPIC_UPDATE_TEMP_HIGH, 0);
+        esp_mqtt_client_subscribe(client, TOPIC_UPDATE_TEMP_LOW, 0);
+        esp_mqtt_client_subscribe(client, TOPIC_UPDATE_HUM_HIGH, 0);
+        esp_mqtt_client_subscribe(client, TOPIC_UPDATE_HUM_LOW, 0);
+        esp_mqtt_client_subscribe(client, TOPIC_UPDATE_PM25_HIGH, 0);
+        ESP_LOGI(TAG, "Subscribed to threshold update topics");
+
+        /* 2. Publish ALL current threshold values on connection (Application First Start/Reconnect) */
+        publish_threshold_state(TOPIC_STATE_TEMP_HIGH, g_temp_high_threshold);
+        publish_threshold_state(TOPIC_STATE_TEMP_LOW, g_temp_low_threshold);
+        publish_threshold_state(TOPIC_STATE_HUM_HIGH, g_hum_high_threshold);
+        publish_threshold_state(TOPIC_STATE_HUM_LOW, g_hum_low_threshold);
+        publish_threshold_state(TOPIC_STATE_PM25_HIGH, g_pm25_high_threshold);
+
+        check_alarms();
         break;
+
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
         g_mqtt_connected = false;
-        check_alarms();  /* Trigger buzzer alarm */
+        check_alarms();
         break;
+
+    case MQTT_EVENT_DATA:
+        ESP_LOGI(TAG, "MQTT_EVENT_DATA");
+        char data_buf[32];
+        int copy_len = event->data_len < (sizeof(data_buf) - 1) ? event->data_len : (sizeof(data_buf) - 1);
+        memcpy(data_buf, event->data, copy_len);
+        data_buf[copy_len] = '\0';
+
+        float new_value = (float)atof(data_buf);
+
+        /* Check which topic received the message, update global, AND publish new state */
+        if (strncmp(event->topic, TOPIC_UPDATE_TEMP_HIGH, event->topic_len) == 0) {
+            g_temp_high_threshold = new_value;
+            ESP_LOGI(TAG, "UPDATED: Temp High -> %.2f", g_temp_high_threshold);
+            publish_threshold_state(TOPIC_STATE_TEMP_HIGH, g_temp_high_threshold);
+
+        } else if (strncmp(event->topic, TOPIC_UPDATE_TEMP_LOW, event->topic_len) == 0) {
+            g_temp_low_threshold = new_value;
+            ESP_LOGI(TAG, "UPDATED: Temp Low -> %.2f", g_temp_low_threshold);
+            publish_threshold_state(TOPIC_STATE_TEMP_LOW, g_temp_low_threshold);
+
+        } else if (strncmp(event->topic, TOPIC_UPDATE_HUM_HIGH, event->topic_len) == 0) {
+            g_hum_high_threshold = new_value;
+            ESP_LOGI(TAG, "UPDATED: Humid High -> %.2f", g_hum_high_threshold);
+            publish_threshold_state(TOPIC_STATE_HUM_HIGH, g_hum_high_threshold);
+
+        } else if (strncmp(event->topic, TOPIC_UPDATE_HUM_LOW, event->topic_len) == 0) {
+            g_hum_low_threshold = new_value;
+            ESP_LOGI(TAG, "UPDATED: Humid Low -> %.2f", g_hum_low_threshold);
+            publish_threshold_state(TOPIC_STATE_HUM_LOW, g_hum_low_threshold);
+
+        } else if (strncmp(event->topic, TOPIC_UPDATE_PM25_HIGH, event->topic_len) == 0) {
+            g_pm25_high_threshold = new_value;
+            ESP_LOGI(TAG, "UPDATED: PM2.5 High -> %.2f", g_pm25_high_threshold);
+            publish_threshold_state(TOPIC_STATE_PM25_HIGH, g_pm25_high_threshold);
+        }
+
+        /* Re-check alarms immediately with new thresholds */
+        check_alarms();
+        break;
+
     case MQTT_EVENT_ERROR:
         ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
         if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
-            ESP_LOGI(TAG, "Last errno string (%s)",
+            ESP_LOGE(TAG, "Last errno string (%s)",
                strerror(event->error_handle->esp_transport_sock_errno));
         }
         g_mqtt_connected = false;
         break;
-    case MQTT_EVENT_PUBLISHED:
-        ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
-        break;
+
     default:
         ESP_LOGI(TAG, "Other event id:%d", event->event_id);
         break;
     }
 }
-
 static void mqtt_app_start(void) {
     char uri_string[64];
-    snprintf(uri_string, sizeof(uri_string), "mqtt://%s", SERVER_IP);
+    snprintf(uri_string, sizeof(uri_string), "mqtts://%s:8883", SERVER_IP);
 
     esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = uri_string,
+        .broker.verification = {
+            .certificate = server_root_cert_pem,
+            .skip_cert_common_name_check = true,
+        },
+        /* Add Credentials Here */
+        .credentials = {
+            .username = MQTT_USER,
+            .authentication = {
+                .password = MQTT_PASS,
+            },
+        },
     };
+
 
     client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler,
@@ -790,11 +879,13 @@ static void display_mode_switcher_task(void *pv) {
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(10000));  /* Switch mode every 10 seconds */
 
-       // Display disabled - BSP not available
-        // if (bsp_display_lock(pdMS_TO_TICKS(100))) {
-        //     display_next_mode();
-        //     bsp_display_unlock();
-        // }
+        /*
+           Display disabled - BSP not available
+           if (bsp_display_lock(pdMS_TO_TICKS(100))) {
+               display_next_mode();
+               bsp_display_unlock();
+           }
+         */
     }
 }
 
@@ -816,7 +907,7 @@ void app_main(void) {
     /* Initialize WiFi in station mode and connect */
     wifi_init_sta();
 
-    /* Start MQTT */
+    /* Start MQTT with TLS */
     mqtt_app_start();
 
     /* Init i2cdev (shared by all I2C devices) */
