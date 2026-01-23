@@ -21,9 +21,9 @@ rad.json
 #Test results file
 TestResults.xml
 # local wi-fi config
-sensitive.h
+# sensitive.h
 # server certificate
-server_root_cert.h
+# server_root_cert.h
 # build folder
 build/
 # cache
